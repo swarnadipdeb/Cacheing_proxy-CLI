@@ -35,6 +35,10 @@ public class ProxyServer {
         // 4️⃣ Start server
         server.start();
         System.out.println("Proxy server started on port " + port);
+
+        try {
+            Thread.currentThread().join();
+        } catch (InterruptedException ignored) {}
     }
 
     /**
@@ -46,4 +50,6 @@ public class ProxyServer {
             System.out.println("Proxy server stopped");
         }
     }
+
+     
 }

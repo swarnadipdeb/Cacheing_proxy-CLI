@@ -5,6 +5,7 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
 import com.example.cachingproxy.server.ProxyServer;
+import com.example.cachingproxy.cache.CacheManager;
 
 @Command(
         name = "caching-proxy",
@@ -26,7 +27,8 @@ public class CachingProxyCLI implements Runnable {
     public void run() {
 
         if (clearCache) {
-            System.out.println("Cache cleared");
+            System.out.println("Cleaning Up...");
+            CacheManager.clear();
             return;
         }
 
@@ -44,13 +46,6 @@ public class CachingProxyCLI implements Runnable {
     try {
         ProxyServer server = new ProxyServer(origin);
         server.start(port);
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                System.out.println("Shutting down server...");
-                server.stop();
-            }));
-            
-            System.out.println("Press Enter to stop the server");
-            System.in.read();
         
     } catch (Exception e) {
         System.err.println("Failed to start server: " + e.getMessage());

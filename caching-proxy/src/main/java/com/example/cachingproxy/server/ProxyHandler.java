@@ -3,6 +3,10 @@ package com.example.cachingproxy.server;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
+import com.example.cachingproxy.cache.CacheEntry;
+import com.example.cachingproxy.cache.CacheKeyUtil;
+import com.example.cachingproxy.cache.CacheManager;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -22,7 +26,7 @@ public class ProxyHandler implements HttpHandler {
                 ? origin.substring(0, origin.length() - 1)
                 : origin;
 
-        // ✅ Force HTTP/1.1 and add timeout
+        // Force HTTP/1.1 and add timeout
         this.httpClient = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .version(HttpClient.Version.HTTP_1_1)  // ← Fixes RST_STREAM error
@@ -30,11 +34,51 @@ public class ProxyHandler implements HttpHandler {
                 .build();
     }
 
+    private Map<String, List<String>> filterResponseHeaders(
+        Map<String, List<String>> headers) {
+
+    Map<String, List<String>> filtered = new java.util.HashMap<>();
+
+    headers.forEach((key, values) -> {
+        if (!key.equalsIgnoreCase("Transfer-Encoding")
+                && !key.equalsIgnoreCase("Content-Length")
+                && !key.equalsIgnoreCase("Connection")) {
+            filtered.put(key, values);
+        }
+    });
+
+    return filtered;
+}
+
     @Override
     public void handle(HttpExchange exchange) throws IOException {
 
+        String method = exchange.getRequestMethod();
+       
+        //  Cache only GET requests
+        if ("GET".equalsIgnoreCase(method)) { 
+            String cacheKey = CacheKeyUtil.generate(exchange);
+            CacheEntry cached = CacheManager.get(cacheKey);
+           if(cached != null) System.out.println("cache found " + cached.getHeaders());
+
+            if (cached != null) {
+                //  CACHE HIT
+                cached.getHeaders()
+                        .forEach((k, v) -> exchange.getResponseHeaders().put(k, v));
+                exchange.getResponseHeaders().add("X-Cache", "HIT");
+
+                exchange.sendResponseHeaders(
+                        cached.getStatusCode(),
+                        cached.getBody().length
+                );
+                exchange.getResponseBody().write(cached.getBody());
+                exchange.close();
+                return;
+            }
+        }
+
         try {
-            String method = exchange.getRequestMethod();
+            System.out.println("running another one");
             String pathWithQuery = exchange.getRequestURI().toString();
             String targetUrl = origin + pathWithQuery;
 
@@ -46,7 +90,7 @@ public class ProxyHandler implements HttpHandler {
                     .uri(targetUri)
                     .timeout(Duration.ofSeconds(30));
 
-            // ✅ Handle request body
+            // Handle request body
             if (method.equalsIgnoreCase("GET")
                     || method.equalsIgnoreCase("DELETE")
                     || method.equalsIgnoreCase("HEAD")) {
@@ -61,13 +105,12 @@ public class ProxyHandler implements HttpHandler {
                 );
             }
 
-            // ✅ Copy request headers (skip restricted ones)
+            // Copy request headers (skip restricted ones)
             for (Map.Entry<String, List<String>> header :
                     exchange.getRequestHeaders().entrySet()) {
 
                 String name = header.getKey();
-
-                // Skip headers that HttpClient sets automatically
+            
                 if (name.equalsIgnoreCase("Host")
                         || name.equalsIgnoreCase("Content-Length")
                         || name.equalsIgnoreCase("Transfer-Encoding")
@@ -76,16 +119,14 @@ public class ProxyHandler implements HttpHandler {
                     continue;
                 }
 
-                for (String value : header.getValue()) {
-                    requestBuilder.header(name, value);
-                }
+                 for (String value : header.getValue()) {
+                      requestBuilder.header(name, value);
+                 }
+                
             }
+             
 
-            // ✅ Set required headers
-            requestBuilder.header("User-Agent", "CachingProxy/1.0");
-            requestBuilder.header("Accept", "*/*");
-
-            // ✅ Send request to origin
+            // Send request to origin
             HttpResponse<byte[]> originResponse =
                     httpClient.send(
                             requestBuilder.build(),
@@ -94,7 +135,7 @@ public class ProxyHandler implements HttpHandler {
 
             System.out.println("← Origin responded: " + originResponse.statusCode());
 
-            // ✅ Copy response headers
+            // Copy response headers
             originResponse.headers().map()
                     .forEach((key, values) -> {
                         // Skip problematic headers
@@ -105,7 +146,22 @@ public class ProxyHandler implements HttpHandler {
                         }
                     });
 
-            // ✅ Send response back to client
+            // Store in cache (GET only)
+            if ("GET".equalsIgnoreCase(method)) {
+                CacheEntry entry = new CacheEntry(
+                        originResponse.statusCode(),
+                        filterResponseHeaders(originResponse.headers().map()),
+                        originResponse.body()
+                );
+                CacheManager.put(
+                        CacheKeyUtil.generate(exchange),
+                        entry
+                );
+            }
+            
+             exchange.getResponseHeaders().add("X-Cache", "MISS");
+
+            //  Send response back to client
             byte[] responseBody = originResponse.body();
             exchange.sendResponseHeaders(
                     originResponse.statusCode(),
