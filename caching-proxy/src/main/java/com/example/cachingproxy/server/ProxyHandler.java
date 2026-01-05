@@ -4,12 +4,11 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -19,100 +18,120 @@ public class ProxyHandler implements HttpHandler {
     private final HttpClient httpClient;
 
     public ProxyHandler(String origin) {
-        this.origin = origin;
-        this.httpClient = HttpClient.newHttpClient();
+        this.origin = origin.endsWith("/")
+                ? origin.substring(0, origin.length() - 1)
+                : origin;
+
+        // ✅ Force HTTP/1.1 and add timeout
+        this.httpClient = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .version(HttpClient.Version.HTTP_1_1)  // ← Fixes RST_STREAM error
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
     }
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
 
         try {
-            // 1️⃣ Build target URL
-            String targetUrl = origin + exchange.getRequestURI().toString();
-            URI uri = URI.create(targetUrl);
+            String method = exchange.getRequestMethod();
+            String pathWithQuery = exchange.getRequestURI().toString();
+            String targetUrl = origin + pathWithQuery;
 
-            System.out.println(
-                    exchange.getRequestMethod() + " " + exchange.getRequestURI()
-            );
+            URI targetUri = URI.create(targetUrl);
 
-            // 2️⃣ Build forwarded request
+            System.out.println("→ Proxying: " + method + " " + targetUri);
+
             HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                    .uri(uri)
-                    .method(
-                            exchange.getRequestMethod(),
-                            getBodyPublisher(exchange)
-                    );
+                    .uri(targetUri)
+                    .timeout(Duration.ofSeconds(30));
 
-            // 3️⃣ Copy request headers
-            for (Map.Entry<String, List<String>> header :
-            exchange.getRequestHeaders().entrySet()) {
+            // ✅ Handle request body
+            if (method.equalsIgnoreCase("GET")
+                    || method.equalsIgnoreCase("DELETE")
+                    || method.equalsIgnoreCase("HEAD")) {
 
-            String name = header.getKey();
+                requestBuilder.method(method, HttpRequest.BodyPublishers.noBody());
 
-            // ❌ Skip restricted headers
-            if (name.equalsIgnoreCase("Host")
-            || name.equalsIgnoreCase("Content-Length")
-            || name.equalsIgnoreCase("Transfer-Encoding")
-            || name.equalsIgnoreCase("Connection")) {
-                continue;
-            }
-
-            for (String value : header.getValue()) {
-                requestBuilder.header(name, value);
-            }
-                }
-
-
-            HttpRequest forwardedRequest = requestBuilder.build();
-
-            // 4️⃣ Send request to origin
-            HttpResponse<byte[]> originResponse =
-                    httpClient.send(
-                            forwardedRequest,
-                            HttpResponse.BodyHandlers.ofByteArray()
-                    );
-
-            // 5️⃣ Copy response headers
-            for (Map.Entry<String, List<String>> header :
-                    originResponse.headers().map().entrySet()) {
-
-                exchange.getResponseHeaders().put(
-                        header.getKey(),
-                        header.getValue()
+            } else {
+                byte[] requestBody = exchange.getRequestBody().readAllBytes();
+                requestBuilder.method(
+                        method,
+                        HttpRequest.BodyPublishers.ofByteArray(requestBody)
                 );
             }
 
-            // 6️⃣ Send response back to client
+            // ✅ Copy request headers (skip restricted ones)
+            for (Map.Entry<String, List<String>> header :
+                    exchange.getRequestHeaders().entrySet()) {
+
+                String name = header.getKey();
+
+                // Skip headers that HttpClient sets automatically
+                if (name.equalsIgnoreCase("Host")
+                        || name.equalsIgnoreCase("Content-Length")
+                        || name.equalsIgnoreCase("Transfer-Encoding")
+                        || name.equalsIgnoreCase("Connection")
+                        ) {
+                    continue;
+                }
+
+                for (String value : header.getValue()) {
+                    requestBuilder.header(name, value);
+                }
+            }
+
+            // ✅ Set required headers
+            requestBuilder.header("User-Agent", "CachingProxy/1.0");
+            requestBuilder.header("Accept", "*/*");
+
+            // ✅ Send request to origin
+            HttpResponse<byte[]> originResponse =
+                    httpClient.send(
+                            requestBuilder.build(),
+                            HttpResponse.BodyHandlers.ofByteArray()
+                    );
+
+            System.out.println("← Origin responded: " + originResponse.statusCode());
+
+            // ✅ Copy response headers
+            originResponse.headers().map()
+                    .forEach((key, values) -> {
+                        // Skip problematic headers
+                        if (!key.equalsIgnoreCase("Transfer-Encoding")
+                                && !key.equalsIgnoreCase("Content-Length")
+                                && !key.equalsIgnoreCase("Connection")) {
+                            exchange.getResponseHeaders().put(key, values);
+                        }
+                    });
+
+            // ✅ Send response back to client
+            byte[] responseBody = originResponse.body();
             exchange.sendResponseHeaders(
                     originResponse.statusCode(),
-                    originResponse.body().length
+                    responseBody.length
             );
 
-            OutputStream os = exchange.getResponseBody();
-            os.write(originResponse.body());
-            os.close();
+            exchange.getResponseBody().write(responseBody);
+            exchange.close();
 
         } catch (Exception e) {
-            String error = "Proxy error: " + e.getMessage();
-            exchange.sendResponseHeaders(500, error.length());
-            exchange.getResponseBody().write(error.getBytes());
-            exchange.close();
+            System.err.println("❌ ERROR proxying request:");
+            System.err.println("   Method: " + exchange.getRequestMethod());
+            System.err.println("   Path: " + exchange.getRequestURI());
+            System.err.println("   Exception: " + e.getClass().getName());
+            System.err.println("   Message: " + e.getMessage());
+            e.printStackTrace();
+
+            try {
+                String msg = "502 Bad Gateway: " + e.getMessage();
+                exchange.sendResponseHeaders(502, msg.length());
+                exchange.getResponseBody().write(msg.getBytes());
+            } catch (IOException ioException) {
+                System.err.println("Failed to send error response: " + ioException.getMessage());
+            } finally {
+                exchange.close();
+            }
         }
-    }
-
-    /**
-     * Handles request body safely
-     */
-    private static HttpRequest.BodyPublisher getBodyPublisher(HttpExchange exchange)
-            throws IOException {
-
-        if ("GET".equalsIgnoreCase(exchange.getRequestMethod())
-                || "DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
-            return HttpRequest.BodyPublishers.noBody();
-        }
-
-        InputStream is = exchange.getRequestBody();
-        byte[] body = is.readAllBytes();
-        return HttpRequest.BodyPublishers.ofByteArray(body);
     }
 }
