@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
+import picocli.CommandLine.ArgGroup;
 
 import com.example.cachingproxy.server.ProxyServer;
 import com.example.cachingproxy.cache.CacheManager;
@@ -24,14 +25,24 @@ import com.example.cachingproxy.util.RuntimeInfo;
 )
 public class CachingProxyCLI implements Runnable {
 
-    @Option(names = "--port",required = true, description = "Proxy port")
-    Integer port;
+    @ArgGroup(exclusive = true, multiplicity = "1")
+    Exclusive exclusive;
 
-    @Option(names = "--origin",required = true, description = "Origin server URL")
-    String origin;
+    static class Exclusive {
+        @ArgGroup(exclusive = false, multiplicity = "1")
+        ServerOptions serverOptions;
 
-    @Option(names = "--clear-cache", description = "Clear cache and exit")
-    boolean clearCache;
+        @Option(names = "--clear-cache", description = "Clear cache and exit")
+        boolean clearCache;
+    }
+
+    static class ServerOptions {
+        @Option(names = "--port", description = "Proxy port", required = true)
+        Integer port;
+
+        @Option(names = "--origin", description = "Origin server URL", required = true)
+        String origin;
+    }
 
     private int readRunningPort() throws Exception {
              if (!Files.exists(RuntimeInfo.INFO_FILE)) {
@@ -53,10 +64,9 @@ public class CachingProxyCLI implements Runnable {
     @Override
     public void run() {
 
-        if (clearCache) {
+        if (exclusive.clearCache) {
             try{
              int port = readRunningPort();
-
                 URI uri = URI.create(
                 "http://localhost:" + port + "/__admin/clear-cache"
             );
@@ -72,26 +82,22 @@ public class CachingProxyCLI implements Runnable {
                 return;
             }catch(Exception e){
                 System.out.println("Unable to clear the cache");
-            }
                 
             }
-
-        
-
+                
+            }else{
+                
         System.out.println("Starting proxy...");
-        System.out.println("Port   : " + port);
-        System.out.println("Origin : " + origin);
-
-         
-
+        System.out.println("Port   : " + exclusive.serverOptions.port);
+        System.out.println("Origin : " + exclusive.serverOptions.origin);
     try {
-        ProxyServer server = new ProxyServer(origin);
-        server.start(port);
+        ProxyServer server = new ProxyServer(exclusive.serverOptions.origin);
+        server.start(exclusive.serverOptions.port);
         
     } catch (Exception e) {
         System.err.println("Failed to start server: " + e.getMessage());
     }
-
+    }
     }
 
     public static void main(String[] args) {
