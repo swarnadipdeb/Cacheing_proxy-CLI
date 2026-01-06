@@ -54,12 +54,23 @@ public class ProxyHandler implements HttpHandler {
     public void handle(HttpExchange exchange) throws IOException {
 
         String method = exchange.getRequestMethod();
+
+        if (method.equals("POST")
+        && exchange.getRequestURI().getPath().equals("/__admin/clear-cache")) {
+
+         CacheManager.clear();
+
+        byte[] resp = "Cache cleared".getBytes();
+         exchange.sendResponseHeaders(200, resp.length);
+         exchange.getResponseBody().write(resp);
+         exchange.close();
+         return;
+            }
        
         //  Cache only GET requests
         if ("GET".equalsIgnoreCase(method)) { 
             String cacheKey = CacheKeyUtil.generate(exchange);
             CacheEntry cached = CacheManager.get(cacheKey);
-           if(cached != null) System.out.println("cache found " + cached.getHeaders());
 
             if (cached != null) {
                 //  CACHE HIT
@@ -78,7 +89,6 @@ public class ProxyHandler implements HttpHandler {
         }
 
         try {
-            System.out.println("running another one");
             String pathWithQuery = exchange.getRequestURI().toString();
             String targetUrl = origin + pathWithQuery;
 
@@ -133,7 +143,6 @@ public class ProxyHandler implements HttpHandler {
                             HttpResponse.BodyHandlers.ofByteArray()
                     );
 
-            System.out.println("← Origin responded: " + originResponse.statusCode());
 
             // Copy response headers
             originResponse.headers().map()
